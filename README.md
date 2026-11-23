@@ -177,3 +177,7 @@ HELLO → tool_call →（回调阻塞等结果）→ ACK
 - 模式层（`multi-round` / `task`）与 MCP 桥未实现，当前只有 `request-reply` 与 `publish-subscribe`。
 - 断开不自动重连（靠发现轮询重新接入）。
 - 无 TLS、无鉴权：定位是本机 / 局域网。
+
+## 作者与来源
+
+本实现的 MIT 许可证版权署名为 **hxh230802**，详见 [LICENSE](LICENSE)。Python 参考实现见 [hxh230802/MSP](https://github.com/hxh230802/MSP)。
