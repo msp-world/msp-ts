@@ -13,12 +13,14 @@
  */
 
 import { Manifest } from "./core/manifest.ts";
+import type { SkillSpec } from "./core/manifest.ts";
 import type { ToolResult } from "./core/content.ts";
 import { Protocol } from "./protocol/protocol.ts";
 import type { ToolHandler } from "./protocol/protocol.ts";
 import { DirectoryDiscovery } from "./discovery/directory.ts";
 import { DirectoryPresence } from "./presence/directory.ts";
 import { TcpTransport } from "./transport/tcp.ts";
+import type { GrantsConfig } from "./core/grants.ts";
 import type { Endpoint } from "./transport/base.ts";
 
 export interface MSPNodeOptions {
@@ -27,6 +29,8 @@ export interface MSPNodeOptions {
   port?: number;
   /** 发现即连（对齐 eager）；false = 只接受入站。 */
   connectPolicy?: "eager" | "lazy";
+  /** 可选本地授权表（对齐 msp-py 0.1.0a2 grants）。 */
+  grants?: GrantsConfig;
 }
 
 export class MSPNode {
@@ -52,7 +56,10 @@ export class MSPNode {
     // 组装点：传输层在这里创建并注入协议层（协议层不认识 TCP）
     this.transport = new TcpTransport();
     this.protocol = new Protocol({
-      nodeId, manifest: this.manifest, transport: this.transport,
+      nodeId,
+      manifest: this.manifest,
+      transport: this.transport,
+      grants: opts.grants,
     });
   }
 
@@ -74,6 +81,12 @@ export class MSPNode {
 
   declareSignal(path: string, description?: string): this {
     this.manifest.addSignal(path, { description });
+    if (this.started) this.protocol.pushManifest();
+    return this;
+  }
+
+  skill(spec: SkillSpec): this {
+    this.manifest.addSkill(spec);
     if (this.started) this.protocol.pushManifest();
     return this;
   }

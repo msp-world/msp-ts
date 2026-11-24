@@ -10,8 +10,9 @@
 
 import { decodeSignal, encodeSignal, makeSignal, SignalType } from "../core/signal.ts";
 import type { Signal } from "../core/signal.ts";
-import type { Manifest } from "../core/manifest.ts";
+import { sanitizePeerManifest, type Manifest } from "../core/manifest.ts";
 import { ToolResult } from "../core/content.ts";
+import { canPub, canReq, grantsFor, type GrantsConfig } from "../core/grants.ts";
 import { patternMatches } from "./matcher.ts";
 import type { ConnectionLike, Endpoint, TransportLike } from "../transport/base.ts";
 
@@ -31,14 +32,18 @@ export interface ProtocolOptions {
   handshakeTimeoutMs?: number;
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
+  /** 可选本地授权表（对齐 msp-py 0.1.0a2 grants）。 */
+  grants?: GrantsConfig;
 }
 
 export class Protocol {
   readonly nodeId: string;
   private readonly manifest: Manifest;
+  private readonly transport: TransportLike;
   private readonly handshakeTimeout: number;
   private readonly heartbeatInterval: number;
   private readonly heartbeatTimeout: number;
+  private readonly grants?: GrantsConfig;
 
   readonly connections = new Map<string, ConnectionLike>();
   readonly peerManifests = new Map<string, Record<string, unknown>>();
@@ -49,6 +54,7 @@ export class Protocol {
   private reqCounter = 0;
   private stopped = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly graceTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly connMeta = new Map<ConnectionLike, { peerId: string }>();
 
   onPeerConnected: (peerId: string, manifest: Record<string, unknown>) => void = () => {};
@@ -61,6 +67,7 @@ export class Protocol {
     this.handshakeTimeout = opts.handshakeTimeoutMs ?? 10_000;
     this.heartbeatInterval = opts.heartbeatIntervalMs ?? 15_000;
     this.heartbeatTimeout = opts.heartbeatTimeoutMs ?? 45_000;
+    this.grants = opts.grants;
   }
 
   tool(name: string, handler: ToolHandler): void {
@@ -144,7 +151,10 @@ export class Protocol {
       this.dispatch(sig.source, sig);
     }
     const peerId = ack.source;
-    const peerManifest = (ack.payload.manifest as Record<string, unknown>) ?? {};
+    if (!peerId || peerId === this.nodeId) {
+      throw new Error(`非法握手：对端自报 nodeId=${peerId}`);
+    }
+    const peerManifest = sanitizePeerManifest(ack.payload.manifest);
     if (!this.finishHandshake(conn, peerId, peerManifest, true)) {
       throw new Error(`与 ${peerId} 的非规范连接被去重关闭`);
     }
@@ -157,14 +167,19 @@ export class Protocol {
       throw new Error(`握手失败，收到 ${hello.type}`);
     }
     const peerId = hello.source;
-    const peerManifest = (hello.payload.manifest as Record<string, unknown>) ?? {};
-    if (!this.finishHandshake(conn, peerId, peerManifest, false)) {
+    if (!peerId || peerId === this.nodeId) {
+      throw new Error(`非法握手：对端自报 nodeId=${peerId}`);
+    }
+    const peerManifest = sanitizePeerManifest(hello.payload.manifest);
+    if (!this.finishHandshake(conn, peerId, peerManifest, false, true)) {
       return; // 非规范方向：关闭、不回 ACK（对端拨号方立刻感知）
     }
+    // 对齐 msp-py 0.1.0a2：ACK 必须先于任何应用报文（包括 onPeerConnected 里的 call()）落线
     conn.send(encodeSignal(makeSignal(SignalType.ACK, this.nodeId, {
       target: peerId,
       payload: { manifest: this.manifest.toDict() },
     })));
+    this.onPeerConnected(peerId, peerManifest);
   }
 
   /** 去重仲裁：返回本条连接是否保留。规范方向 = node_id 较小一方 outbound。 */
@@ -173,10 +188,11 @@ export class Protocol {
     peerId: string,
     peerManifest: Record<string, unknown>,
     outbound: boolean,
+    deferCallback = false,
   ): boolean {
     const existing = this.connections.get(peerId);
     if (!existing) {
-      this.register(conn, peerId, peerManifest);
+      this.register(conn, peerId, peerManifest, deferCallback);
       return true;
     }
     if (existing === conn) {
@@ -186,17 +202,27 @@ export class Protocol {
     }
     const canonicalIsOutbound = this.nodeId < peerId;
     if (outbound === canonicalIsOutbound) {
-      // 本条才是规范方向：顶掉旧的。旧连接的 onClose 看到 peerId 已指向新连接，不会误删。
+      // 本条才是规范方向：顶掉旧的。延迟关闭旧连接，让新连接先在对端落地。
       this.connMeta.delete(existing);
-      existing.close();
-      this.register(conn, peerId, peerManifest);
+      const timer = setTimeout(() => {
+        this.graceTimers.delete(timer);
+        existing.close();
+      }, 2000);
+      timer.unref?.();
+      this.graceTimers.add(timer);
+      this.register(conn, peerId, peerManifest, deferCallback);
       return true;
     }
     conn.close();
     return false;
   }
 
-  private register(conn: ConnectionLike, peerId: string, peerManifest: Record<string, unknown>): void {
+  private register(
+    conn: ConnectionLike,
+    peerId: string,
+    peerManifest: Record<string, unknown>,
+    deferCallback = false,
+  ): void {
     this.connections.set(peerId, conn);
     this.peerManifests.set(peerId, peerManifest);
     this.lastSeen.set(peerId, Date.now() / 1000);
@@ -226,13 +252,19 @@ export class Protocol {
         this.onPeerDisconnected(peerId);
       }
     };
-    this.onPeerConnected(peerId, peerManifest);
+    if (!deferCallback) {
+      this.onPeerConnected(peerId, peerManifest);
+    }
   }
 
   private dispatch(peerId: string, msg: Signal): void {
     this.lastSeen.set(peerId, Date.now() / 1000);
     switch (msg.type) {
-      case SignalType.SIGNAL:
+      case SignalType.SIGNAL: {
+        if (this.grants && msg.path) {
+          const g = grantsFor(this.grants, peerId, true);
+          if (!canPub(g, msg.path)) break;
+        }
         for (const h of this.handlers) {
           if (msg.path && patternMatches(h.pattern, msg.path)) {
             try {
@@ -243,6 +275,7 @@ export class Protocol {
           }
         }
         break;
+      }
 
       case SignalType.TOOL_CALL:
         void this.runTool(peerId, msg);
@@ -268,9 +301,16 @@ export class Protocol {
         break;
       }
 
-      case SignalType.MANIFEST_UPDATE:
-        this.peerManifests.set(peerId, (msg.payload.manifest as Record<string, unknown>) ?? {});
+      case SignalType.MANIFEST_UPDATE: {
+        const incoming = sanitizePeerManifest(msg.payload.manifest);
+        const newVersion = typeof incoming.version === "number" ? incoming.version : 0;
+        const prev = this.peerManifests.get(peerId);
+        const curVersion = typeof prev?.version === "number" ? prev.version : 0;
+        if (!prev || newVersion > curVersion) {
+          this.peerManifests.set(peerId, incoming);
+        }
         break;
+      }
 
       case SignalType.PING:
         this.send(peerId, makeSignal(SignalType.PONG, this.nodeId, { target: peerId }));
@@ -292,15 +332,27 @@ export class Protocol {
     const name = msg.payload.tool as string;
     const args = (msg.payload.args as Record<string, unknown>) ?? {};
     let payload: Record<string, unknown>;
-    const handler = this.tools.get(name);
-    if (!handler) {
-      payload = { content: [], error: `未知工具: ${name}` };
+    if (this.grants && !canReq(grantsFor(this.grants, peerId, true), name)) {
+      payload = { content: [], error: `未授权调用工具: ${name}` };
     } else {
-      try {
-        const value = await handler(args);
-        payload = { content: [], structuredContent: value ?? null };
-      } catch (err) {
-        payload = { content: [], error: err instanceof Error ? err.message : String(err) };
+      const handler = this.tools.get(name);
+      if (!handler) {
+        payload = { content: [], error: `未知工具: ${name}` };
+      } else {
+        try {
+          const value = await handler(args);
+          if (value instanceof ToolResult) {
+            payload = {
+              content: value.content,
+              structuredContent: value.structuredContent ?? null,
+              ...(value.error ? { error: value.error } : {}),
+            };
+          } else {
+            payload = { content: [], structuredContent: value ?? null };
+          }
+        } catch (err) {
+          payload = { content: [], error: err instanceof Error ? err.message : String(err) };
+        }
       }
     }
     try {
@@ -392,6 +444,8 @@ export class Protocol {
   stop(): void {
     this.stopped = true;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    for (const t of this.graceTimers) clearTimeout(t);
+    this.graceTimers.clear();
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.resolve(new ToolResult([], undefined, "节点已停止"));
