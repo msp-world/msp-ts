@@ -1,5 +1,5 @@
 {
-  "name": "msp-ts",
+  "name": "mspts",
   "version": "0.1.0",
   "description": "MSP（Model Sensing Protocol）的 TypeScript 实现 —— 与 msp-py 线格式互通",
   "license": "MIT",
