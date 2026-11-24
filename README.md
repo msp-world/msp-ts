@@ -92,7 +92,7 @@ test/
 ## 用法
 
 ```ts
-import { MSPNode } from "mspts";
+import { MSPNode } from "@msp-world/mspts";
 
 const node = new MSPNode("ts_b", { nodesDir: "/tmp/msp-nodes" });
 
