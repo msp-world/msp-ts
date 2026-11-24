@@ -14,6 +14,7 @@
 
 import { Manifest } from "./core/manifest.ts";
 import type { SkillSpec } from "./core/manifest.ts";
+import type { Signal } from "./core/signal.ts";
 import type { ToolResult } from "./core/content.ts";
 import { Protocol } from "./protocol/protocol.ts";
 import type { ToolHandler } from "./protocol/protocol.ts";

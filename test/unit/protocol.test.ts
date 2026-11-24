@@ -11,10 +11,15 @@ import { Protocol } from "../../src/protocol/protocol.ts";
 import type { ConnectionLike, Endpoint, TransportLike } from "../../src/transport/base.ts";
 
 class FakeConn implements ConnectionLike {
+  readonly peerHost = "127.0.0.1";
   onData: (frame: Buffer) => void = () => {};
   onClose: () => void = () => {};
   sent: Buffer[] = [];
   closed = false;
+
+  get isClosed(): boolean {
+    return this.closed;
+  }
 
   send(frame: Buffer): void {
     this.sent.push(frame);

@@ -11,7 +11,7 @@
 import { decodeSignal, encodeSignal, makeSignal, SignalType } from "../core/signal.ts";
 import type { Signal } from "../core/signal.ts";
 import { sanitizePeerManifest, type Manifest } from "../core/manifest.ts";
-import { ToolResult } from "../core/content.ts";
+import { ToolResult, type ContentBlock } from "../core/content.ts";
 import { canPub, canReq, grantsFor, type GrantsConfig } from "../core/grants.ts";
 import { patternMatches } from "./matcher.ts";
 import type { ConnectionLike, Endpoint, TransportLike } from "../transport/base.ts";
@@ -290,7 +290,7 @@ export class Protocol {
         clearTimeout(entry.timer);
         if (msg.type === SignalType.TOOL_RESULT) {
           entry.resolve(new ToolResult(
-            (msg.payload.content as unknown[]) ?? [],
+            (msg.payload.content as ContentBlock[]) ?? [],
             msg.payload.structuredContent,
             typeof msg.payload.error === "string" ? msg.payload.error : undefined,
           ));
